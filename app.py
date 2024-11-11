@@ -1,4 +1,4 @@
-import sys  # Add this import
+import sys
 import os
 from pathlib import Path
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
@@ -6,12 +6,12 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                            QScrollArea, QMessageBox, QRubberBand)
 from PyQt5.QtCore import Qt, QRect, QPoint, QSize
 from PyQt5.QtGui import QImage, QPixmap, QPainter, QPen
-import json
+import cv2
 
-class ImageAnnotator(QMainWindow):
+class ImageCropper(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Image Annotation Tool")
+        self.setWindowTitle("Image Cropping Tool")
         self.setGeometry(100, 100, 1200, 800)
         
         # Initialize variables
@@ -19,10 +19,8 @@ class ImageAnnotator(QMainWindow):
         self.image_files = []
         self.current_image_index = -1
         self.current_image = None
-        self.crop_rect = None
         self.rubberband = None
         self.origin = QPoint()
-        self.annotations = {}
         
         self.init_ui()
         
@@ -48,8 +46,8 @@ class ImageAnnotator(QMainWindow):
         
         # Navigation buttons
         nav_layout = QHBoxLayout()
-        self.prev_btn = QPushButton("Previous")
-        self.next_btn = QPushButton("Next")
+        self.prev_btn = QPushButton("Previous (C)")
+        self.next_btn = QPushButton("Next (V)")
         self.prev_btn.clicked.connect(self.prev_image)
         self.next_btn.clicked.connect(self.next_image)
         nav_layout.addWidget(self.prev_btn)
@@ -57,18 +55,26 @@ class ImageAnnotator(QMainWindow):
         left_layout.addLayout(nav_layout)
         
         # Delete button
-        self.delete_btn = QPushButton("Delete Current Image")
+        self.delete_btn = QPushButton("Delete Image (X)")
         self.delete_btn.clicked.connect(self.delete_current_image)
         left_layout.addWidget(self.delete_btn)
-        
-        # Save annotation button
-        self.save_btn = QPushButton("Save Annotation")
-        self.save_btn.clicked.connect(self.save_annotation)
-        left_layout.addWidget(self.save_btn)
         
         # Image counter
         self.counter_label = QLabel("Image: 0/0")
         left_layout.addWidget(self.counter_label)
+        
+        # Add shortcuts explanation
+        shortcuts_label = QLabel(
+            "Instructions:\n"
+            "1. Select folder with images\n"
+            "2. Click and drag to crop\n"
+            "3. Release to save cropped area\n\n"
+            "Keyboard Shortcuts:\n"
+            "X - Delete image\n"
+            "C - Previous image\n"
+            "V - Next image"
+        )
+        left_layout.addWidget(shortcuts_label)
         
         # Add stretch to push controls to top
         left_layout.addStretch()
@@ -86,7 +92,21 @@ class ImageAnnotator(QMainWindow):
         
         # Initialize buttons as disabled
         self.update_button_states()
-        
+
+    def keyPressEvent(self, event):
+        """Handle keyboard shortcuts"""
+        if event.key() == Qt.Key_X:  # Delete image
+            if self.delete_btn.isEnabled():
+                self.delete_current_image()
+        elif event.key() == Qt.Key_C:  # Previous image
+            if self.prev_btn.isEnabled():
+                self.prev_image()
+        elif event.key() == Qt.Key_V:  # Next image
+            if self.next_btn.isEnabled():
+                self.next_image()
+        else:
+            super().keyPressEvent(event)
+            
     def select_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Folder")
         if folder:
@@ -119,24 +139,10 @@ class ImageAnnotator(QMainWindow):
             self.current_image = QImage(str(image_path))
             self.display_image()
             
-            # Load existing annotation if any
-            self.load_annotation()
-            
     def display_image(self):
-        """Display the current image with any existing annotations"""
+        """Display the current image"""
         if self.current_image:
-            # Create a copy of the image to draw on
             pixmap = QPixmap.fromImage(self.current_image)
-            
-            # Draw the saved annotation if it exists
-            if self.crop_rect:
-                painter = QPainter(pixmap)
-                pen = QPen(Qt.red, 2, Qt.SolidLine)
-                painter.setPen(pen)
-                painter.drawRect(self.crop_rect)
-                painter.end()
-            
-            # Scale the pixmap to fit the display area while maintaining aspect ratio
             scaled_pixmap = pixmap.scaled(self.scroll_area.size(), 
                                         Qt.KeepAspectRatio, 
                                         Qt.SmoothTransformation)
@@ -156,7 +162,6 @@ class ImageAnnotator(QMainWindow):
         self.prev_btn.setEnabled(has_current and self.current_image_index > 0)
         self.next_btn.setEnabled(has_current and self.current_image_index < len(self.image_files) - 1)
         self.delete_btn.setEnabled(has_current)
-        self.save_btn.setEnabled(has_current and self.crop_rect is not None)
         
     def prev_image(self):
         """Go to previous image"""
@@ -175,41 +180,39 @@ class ImageAnnotator(QMainWindow):
             self.update_button_states()
             
     def delete_current_image(self):
-        """Delete the current image after confirmation"""
+        """Delete the current image and move to next"""
         if self.current_image_index < 0:
             return
             
-        reply = QMessageBox.question(self, 'Confirm Delete',
-                                   'Are you sure you want to delete this image?',
-                                   QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-                                   
-        if reply == QMessageBox.Yes:
-            # Get the current image path
+        try:
+            # Get current image path
             current_path = self.image_files[self.current_image_index]
             
-            # Delete the image file
-            try:
+            # Delete the original image
+            if os.path.exists(current_path):
                 os.remove(current_path)
-                
-                # Remove from our list
-                self.image_files.pop(self.current_image_index)
-                
-                # Update current index
-                if self.image_files:
-                    if self.current_image_index >= len(self.image_files):
-                        self.current_image_index = len(self.image_files) - 1
-                    self.load_current_image()
-                else:
-                    self.current_image_index = -1
-                    self.image_label.clear()
-                    self.current_image = None
-                    
-                self.update_counter()
-                self.update_button_states()
-                
-            except Exception as e:
-                QMessageBox.critical(self, 'Error',
-                                   f'Failed to delete image: {str(e)}')
+            
+            # Remove from our list
+            self.image_files.pop(self.current_image_index)
+            
+            # If there are more images, load the next one
+            if self.image_files:
+                # If we're at the end, move to the last image
+                if self.current_image_index >= len(self.image_files):
+                    self.current_image_index = len(self.image_files) - 1
+                self.load_current_image()
+            else:
+                # No more images
+                self.current_image_index = -1
+                self.image_label.clear()
+                self.current_image = None
+            
+            self.update_counter()
+            self.update_button_states()
+            
+        except Exception as e:
+            QMessageBox.critical(self, 'Error',
+                               f'Failed to delete image: {str(e)}')
                 
     def mousePressEvent(self, event):
         """Handle mouse press for starting rectangle drawing"""
@@ -230,12 +233,11 @@ class ImageAnnotator(QMainWindow):
             self.rubberband.setGeometry(QRect(self.origin, pos).normalized())
             
     def mouseReleaseEvent(self, event):
-        """Handle mouse release for finishing rectangle drawing"""
+        """Handle mouse release for cropping"""
         if self.rubberband and event.button() == Qt.LeftButton:
             # Convert rubber band geometry to image coordinates
             label_rect = self.rubberband.geometry()
             pixmap_size = self.image_label.pixmap().size()
-            label_size = self.image_label.size()
             
             # Calculate scaling factors
             x_scale = self.current_image.width() / pixmap_size.width()
@@ -249,67 +251,71 @@ class ImageAnnotator(QMainWindow):
                 int(label_rect.height() * y_scale)
             )
             
-            self.crop_rect = image_rect
             self.rubberband.hide()
-            self.display_image()
+            
+            # First crop and save
+            self.crop_and_save_image(image_rect)
+            
+            # Delete original image
+            current_path = self.image_files[self.current_image_index]
+            try:
+                os.remove(current_path)
+            except Exception as e:
+                QMessageBox.critical(self, 'Error',
+                                f'Failed to delete image: {str(e)}')
+                return
+            
+            # Remove from our list
+            self.image_files.pop(self.current_image_index)
+            
+            # Move to next image if available
+            if self.image_files:
+                # If we're at the end, adjust the index
+                if self.current_image_index >= len(self.image_files):
+                    self.current_image_index = len(self.image_files) - 1
+                # Load the next image
+                self.load_current_image()
+            else:
+                # No more images
+                self.current_image_index = -1
+                self.image_label.clear()
+                self.current_image = None
+            
+            # Update UI
+            self.update_counter()
             self.update_button_states()
             
-    def save_annotation(self):
-        """Save the current annotation to a JSON file"""
-        if not self.crop_rect or self.current_image_index < 0:
-            return
-            
-        current_path = self.image_files[self.current_image_index]
-        annotation_path = current_path.with_suffix('.json')
-        
-        annotation_data = {
-            'image_path': str(current_path),
-            'crop_rect': {
-                'x': self.crop_rect.x(),
-                'y': self.crop_rect.y(),
-                'width': self.crop_rect.width(),
-                'height': self.crop_rect.height()
-            }
-        }
-        
-        try:
-            with open(annotation_path, 'w') as f:
-                json.dump(annotation_data, f, indent=4)
-            QMessageBox.information(self, 'Success',
-                                  'Annotation saved successfully!')
-        except Exception as e:
-            QMessageBox.critical(self, 'Error',
-                               f'Failed to save annotation: {str(e)}')
-                               
-    def load_annotation(self):
-        """Load existing annotation for the current image"""
+    def crop_and_save_image(self, rect):
+        """Crop the selected area and save it"""
         if self.current_image_index < 0:
             return
             
         current_path = self.image_files[self.current_image_index]
-        annotation_path = current_path.with_suffix('.json')
         
-        self.crop_rect = None
-        
-        if annotation_path.exists():
-            try:
-                with open(annotation_path, 'r') as f:
-                    annotation_data = json.load(f)
-                    rect_data = annotation_data['crop_rect']
-                    self.crop_rect = QRect(
-                        rect_data['x'],
-                        rect_data['y'],
-                        rect_data['width'],
-                        rect_data['height']
-                    )
-            except Exception as e:
-                print(f"Failed to load annotation: {str(e)}")
-                
-        self.update_button_states()
+        try:
+            # Read image with OpenCV
+            img = cv2.imread(str(current_path))
+            
+            # Get crop coordinates
+            x = max(0, rect.x())
+            y = max(0, rect.y())
+            w = min(rect.width(), img.shape[1] - x)
+            h = min(rect.height(), img.shape[0] - y)
+            
+            # Crop image
+            cropped = img[y:y+h, x:x+w]
+            
+            # Save cropped image with a modified name
+            crop_path = current_path.parent / f"crop_{current_path.name}"
+            cv2.imwrite(str(crop_path), cropped)
+            
+        except Exception as e:
+            QMessageBox.critical(self, 'Error',
+                               f'Failed to crop image: {str(e)}')
 
 def main():
     app = QApplication(sys.argv)
-    window = ImageAnnotator()
+    window = ImageCropper()
     window.show()
     sys.exit(app.exec_())
 
